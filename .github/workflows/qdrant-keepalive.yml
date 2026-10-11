@@ -5,8 +5,10 @@ name: Qdrant Keep-Alive
 #
 # Setup nach Merge:
 #   Settings -> Secrets and variables -> Actions -> New repository secret
-#   Name:  QDRANT_HEALTHZ_URL
-#   Value: vollstaendige URL inkl. Schema, z.B. https://<id>.<region>.qdrant.io/healthz
+#   Name 1:  QDRANT_HEALTHZ_URL   (Pflicht)
+#   Value 1: vollstaendige URL inkl. Schema, z.B. https://<id>.<region>.qdrant.io/healthz
+#   Name 2:  QDRANT_API_KEY       (Optional - nur noetig wenn Cluster Auth auf /healthz verlangt)
+#   Value 2: API-Key aus Qdrant-Cloud-Dashboard -> API Keys
 
 on:
   schedule:
@@ -33,6 +35,7 @@ jobs:
       - name: Qdrant /healthz pingen
         env:
           QDRANT_HEALTHZ_URL: ${{ secrets.QDRANT_HEALTHZ_URL }}
+          QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
         run: |
           if [ -z "$QDRANT_HEALTHZ_URL" ]; then
             echo "::error::Secret QDRANT_HEALTHZ_URL ist nicht gesetzt."
@@ -45,17 +48,40 @@ jobs:
           fi
 
           echo "Pinge: $QDRANT_HEALTHZ_URL"
+          if [ -n "$QDRANT_API_KEY" ]; then
+            echo "Authentifizierung: api-key-Header wird gesendet"
+          else
+            echo "Authentifizierung: keine (offener Endpoint erwartet)"
+          fi
 
-          # -sS: silent (kein Progress) aber Errors anzeigen
-          # -o: Body in Datei, -w: Status-Code ausgeben
+          # curl-Args aufbauen; api-key-Header nur wenn Secret gesetzt
+          curl_args=(-sS -o /tmp/qdrant-health.txt -w "%{http_code}" "$QDRANT_HEALTHZ_URL")
+          if [ -n "$QDRANT_API_KEY" ]; then
+            curl_args+=(-H "api-key: ${QDRANT_API_KEY}")
+          fi
+
           # 2>/tmp/curl-err.txt: stderr separat, damit wir es bei Fehler anzeigen koennen
-          status=$(curl -sS -o /tmp/qdrant-health.txt -w "%{http_code}" \
-                   "$QDRANT_HEALTHZ_URL" 2>/tmp/curl-err.txt || echo "000")
+          status=$(curl "${curl_args[@]}" 2>/tmp/curl-err.txt || echo "000")
 
           echo "HTTP-Status: $status"
 
           if [ "$status" != "200" ]; then
             echo "::error::Unerwarteter Status: $status (erwartet 200)"
+
+            # 403 ohne API-Key: typisch fuer Qdrant-Cloud-Cluster mit Auth auf /healthz
+            if [ "$status" = "403" ] && [ -z "$QDRANT_API_KEY" ]; then
+              echo ""
+              echo "Diagnose: 403 ohne API-Key deutet auf Qdrant-Cloud-Cluster hin,"
+              echo "          der Authentifizierung auch fuer /healthz verlangt."
+              echo "Loesung: Secret QDRANT_API_KEY setzen (Qdrant-Cloud-Dashboard -> API Keys)."
+            fi
+            # 403 mit API-Key: Key ist gesetzt aber wird abgelehnt
+            if [ "$status" = "403" ] && [ -n "$QDRANT_API_KEY" ]; then
+              echo ""
+              echo "Diagnose: 403 trotz API-Key. Key ist gesetzt, wird aber abgelehnt."
+              echo "          Bitte Wert pruefen (Tippfehler, abgelaufen, falscher Cluster-Scope)."
+            fi
+
             echo "---- curl-stderr ----"
             cat /tmp/curl-err.txt 2>/dev/null || echo "(leer)"
             echo "---- response-body ----"
