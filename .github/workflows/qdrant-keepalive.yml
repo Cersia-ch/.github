@@ -1,0 +1,69 @@
+name: Qdrant Keep-Alive
+
+# Pingt regelmaessig den /healthz-Endpoint des Qdrant-Cloud-Free-Tier-Clusters,
+# damit dieser nicht wegen Inaktivitaet geloescht wird.
+#
+# Setup nach Merge:
+#   Settings -> Secrets and variables -> Actions -> New repository secret
+#   Name:  QDRANT_HEALTHZ_URL
+#   Value: vollstaendige URL inkl. Schema, z.B. https://<id>.<region>.qdrant.io/healthz
+
+on:
+  schedule:
+    # Jeden 1. und 15. des Monats um 03:00 UTC (≈ alle 14 Tage).
+    # GitHub-Actions-Cron unterstuetzt kein "*/14", daher 1,15.
+    - cron: '0 3 1,15 * *'
+  # Manueller Trigger fuer sofortigen Test nach Secret-Konfiguration.
+  workflow_dispatch:
+
+# Stille Konkurrenz-Vermeidung: keine parallele Ausfuehrung (sollte ohnehin nie passieren).
+concurrency:
+  group: qdrant-keepalive
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    name: Qdrant /healthz pingen
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Qdrant /healthz pingen
+        env:
+          QDRANT_HEALTHZ_URL: ${{ secrets.QDRANT_HEALTHZ_URL }}
+        run: |
+          if [ -z "$QDRANT_HEALTHZ_URL" ]; then
+            echo "::error::Secret QDRANT_HEALTHZ_URL ist nicht gesetzt."
+            echo ""
+            echo "Bitte unter Settings -> Secrets and variables -> Actions setzen:"
+            echo "  Name:  QDRANT_HEALTHZ_URL"
+            echo "  Value: vollstaendige URL inkl. Schema, z.B."
+            echo "         https://<id>.<region>.qdrant.io/healthz"
+            exit 1
+          fi
+
+          echo "Pinge: $QDRANT_HEALTHZ_URL"
+
+          # -sS: silent (kein Progress) aber Errors anzeigen
+          # -o: Body in Datei, -w: Status-Code ausgeben
+          # 2>/tmp/curl-err.txt: stderr separat, damit wir es bei Fehler anzeigen koennen
+          status=$(curl -sS -o /tmp/qdrant-health.txt -w "%{http_code}" \
+                   "$QDRANT_HEALTHZ_URL" 2>/tmp/curl-err.txt || echo "000")
+
+          echo "HTTP-Status: $status"
+
+          if [ "$status" != "200" ]; then
+            echo "::error::Unerwarteter Status: $status (erwartet 200)"
+            echo "---- curl-stderr ----"
+            cat /tmp/curl-err.txt 2>/dev/null || echo "(leer)"
+            echo "---- response-body ----"
+            cat /tmp/qdrant-health.txt 2>/dev/null || echo "(leer)"
+            exit 1
+          fi
+
+          echo "OK - Qdrant-Cluster ist erreichbar."
+          echo "---- response-body (Anfang) ----"
+          head -c 200 /tmp/qdrant-health.txt
+          echo ""
